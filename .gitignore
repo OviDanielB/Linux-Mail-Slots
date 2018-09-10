@@ -1,5 +1,0 @@
-*.mod.*
-*.ko
-*.o
-modules.order
-Modules.sysvers

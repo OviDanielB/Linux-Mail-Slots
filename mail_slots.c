@@ -29,25 +29,74 @@ MODULE_PARM_DESC(string, "Hidden string");
 module_param_array(myArray, int, &arrlen, S_IRUSR | S_IWUSR);
 MODULE_PARM_DESC(myArray, "Array of ints");
 
-static int major;
+static int Major;
+static mail_instances instances;
+
+int open_mail(struct inode *node, struct file *filp){
+  int minor;
+
+  log_debug("Open");
+  minor = MINOR(node->i_rdev);
+  printk(KERN_INFO "Opened device file with minor %d\n", minor);
+  return 0;
+}
+
+int release_mail(struct inode *node, struct file *filp){
+  int minor;
+  log_debug("Release");
+  minor = MINOR(node->i_rdev);
+  printk(KERN_INFO "Released device file with minor %d\n", minor);
+  return 0;
+}
+
+ssize_t write_mail(struct file *filp,
+  const char *bugg, size_t len, loff_t *off){
+  int minor;
+
+  log_debug("Write");
+  minor = iminor(filp->f_path.dentry->d_inode);
+
+  return len;
+
+}
+
+ssize_t read_mail(struct file *filp,
+  char *bugg, size_t len, loff_t *off){
+    int minor;
+
+    log_debug("Read");
+    minor = iminor(filp->f_path.dentry->d_inode);
+    return len;
+}
+
 
 static struct file_operations fops = {
-  .read = NULL,
-  .write = NULL,
-  .open = NULL,
-  .release = NULL
+  .read = read_mail,
+  .write = write_mail,
+  .open = open_mail,
+  .release = release_mail,
 };
+/* more portable solution */
+//SET_MODULE_OWNER(&fops);
 
 int __init init_module(void){
+  int i;
+  mailslot *mail;
   log_info("Module init");
 
-  major = register_chrdev(DEVICE_MAJOR, DEVICE_NAME, &fops);
-  if(major < 0){
+  Major = register_chrdev(DEVICE_MAJOR, DEVICE_NAME, &fops);
+  if(Major < 0){
     log_alert("Registering char device failed.");
     log_alert("Module not registered");
     return 1;
   }
-  printk(KERN_INFO "Device successfully registered with MAJOR %d.\n", major);
+  printk(KERN_INFO "Device successfully registered with MAJOR %d.\n", Major);
+
+  for(i = 0; i < MAIL_INSTANCES; i++){
+      mail = &(instances.instances[i]);
+      atomic_set(&(mail->len), 0);
+      INIT_LIST_HEAD(&mail->mess_list);
+  }
 
   mailslot *m = kmalloc(sizeof(mailslot), GFP_KERNEL);
   if(!m){
@@ -86,7 +135,7 @@ int __init init_module(void){
 
 void __exit cleanup_module(void){
 
-  unregister_chrdev(major, DEVICE_NAME);
+  unregister_chrdev(Major, DEVICE_NAME);
   log_info("Device unregistered successfully");
   log_info("Module released");
 }

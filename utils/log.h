@@ -10,5 +10,7 @@ void log_error(char *msg);
 void log_warning(char *msg);
 void log_debug(char *msg);
 void log_alert(char *msg);
+void log_dev(int maj, int min, char *msg);
+void log_dev_err(int maj, int min, char *msg);
 
 #endif

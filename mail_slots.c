@@ -37,7 +37,7 @@ int open_mail(struct inode *node, struct file *filp){
 
   log_debug("Open");
   minor = MINOR(node->i_rdev);
-  printk(KERN_INFO "Opened device file with minor %d\n", minor);
+  log_dev(Major, minor, "opened");
   return 0;
 }
 
@@ -45,16 +45,39 @@ int release_mail(struct inode *node, struct file *filp){
   int minor;
   log_debug("Release");
   minor = MINOR(node->i_rdev);
-  printk(KERN_INFO "Released device file with minor %d\n", minor);
+  log_dev(Major, minor, "released");
   return 0;
 }
 
 ssize_t write_mail(struct file *filp,
-  const char *bugg, size_t len, loff_t *off){
+  const char *buff, size_t len, loff_t *off){
   int minor;
+  mailslot *mail;
+  message *mess;
 
   log_debug("Write");
   minor = iminor(filp->f_path.dentry->d_inode);
+
+  if(len > MESS_MAX_SIZE){
+    log_dev_err(Major, minor, "Trying to write message bigger than MAX_SIZE");
+    return 0;
+  }
+
+  mail = &(instances.instances[minor]);
+  mess = kmalloc(sizeof(message), GFP_KERNEL);
+  if(!mess){
+    log_alert("Failed message struct alloc");
+    return 0;
+  }
+
+  mess->content = kmalloc(sizeof(char) * MESS_MAX_SIZE, GFP_KERNEL);
+  if(!mess->content){
+    log_alert("Failed message content alloc");
+    return 0;
+  }
+
+  copy_from_user(mess->content, buff, len);
+  log_info(mess->content);
 
   return len;
 
@@ -86,11 +109,11 @@ int __init init_module(void){
 
   Major = register_chrdev(DEVICE_MAJOR, DEVICE_NAME, &fops);
   if(Major < 0){
-    log_alert("Registering char device failed.");
+    log_dev(DEVICE_MAJOR, -1, "registration failed");
     log_alert("Module not registered");
     return 1;
   }
-  printk(KERN_INFO "Device successfully registered with MAJOR %d.\n", Major);
+  log_dev(Major, -1, "registration succedded");
 
   for(i = 0; i < MAIL_INSTANCES; i++){
       mail = &(instances.instances[i]);
@@ -136,6 +159,6 @@ int __init init_module(void){
 void __exit cleanup_module(void){
 
   unregister_chrdev(Major, DEVICE_NAME);
-  log_info("Device unregistered successfully");
+  log_dev(Major, -1, "Unregistered successfully");
   log_info("Module released");
 }

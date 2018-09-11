@@ -1,4 +1,4 @@
 
-sudo rmmod maislots
+sudo rmmod mailslots
 
 sudo rm /dev/mail0

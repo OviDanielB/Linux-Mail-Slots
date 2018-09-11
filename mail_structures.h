@@ -13,7 +13,8 @@ typedef struct message {
 
 typedef struct mailslot {
   struct list_head mess_list;
-  atomic_t len;
+  long size;
+  int len;
   spinlock_t lock;
 
 } mailslot;

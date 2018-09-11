@@ -37,7 +37,7 @@ int open_mail(struct inode *node, struct file *filp){
 
   log_debug("Open");
   minor = MINOR(node->i_rdev);
-  log_dev(Major, minor, "opened");
+  log_dev(Major, minor, "Opened");
   return 0;
 }
 
@@ -45,39 +45,94 @@ int release_mail(struct inode *node, struct file *filp){
   int minor;
   log_debug("Release");
   minor = MINOR(node->i_rdev);
-  log_dev(Major, minor, "released");
+  log_dev(Major, minor, "Released");
   return 0;
+}
+
+mailslot *mail_of(int minor){
+  return &(instances.instances[minor]);
+}
+
+int enough_space(int minor, int len){
+  mailslot *mail;
+  mail = mail_of(minor);
+  if(len > MESS_MAX_SIZE){
+    log_dev_err(Major, minor, "Trying to write message bigger than MAX_SIZE");
+    return 0;
+  }
+  if(mail->size + len > MAIL_INSTANCE_MAX_STORAGE){
+    log_dev_err(Major, minor, "Not enough space to write message");
+    return 0;
+  }
+  return 1;
+}
+
+message *create_message(int minor, const char *buff, int len){
+  message *mess;
+
+  size_t m_len;
+  int ret;
+
+  if(!enough_space(minor,len)){
+    return NULL;
+  }
+
+  if(buff[len-1] == '\0'){
+    m_len = len;
+  } else {
+    m_len = len + 1;
+  }
+
+  mess = kmalloc(sizeof(message), GFP_KERNEL);
+  if(!mess){
+    log_alert("Failed message struct alloc");
+    return NULL;
+  }
+
+  mess->content = kmalloc(sizeof(char) * m_len, GFP_KERNEL);
+  if(!mess->content){
+    log_alert("Failed message content alloc");
+    return NULL;
+  }
+
+  ret = copy_from_user(mess->content, buff, len);
+  if(ret < 0){
+    log_error("Copy from user");
+    return NULL;
+  }
+  mess->content[m_len - 1] = '\0';
+  mess->len = m_len;
+
+  log_debug("Message created");
+  return mess;
+}
+
+void add_mess_to_mail(int minor, message *mess){
+  mailslot *mail;
+
+  mail = mail_of(minor);
+  list_add_tail(&mess->list, &mail->mess_list);
+
+  int j = 0;
+  message *m;
+  list_for_each_entry(m, &mail->mess_list, list){
+    printk(KERN_INFO "%d %s\n", j, m->content);
+    j++;
+  }
 }
 
 ssize_t write_mail(struct file *filp,
   const char *buff, size_t len, loff_t *off){
-  int minor;
-  mailslot *mail;
+  int minor, ret;
+
   message *mess;
 
   log_debug("Write");
   minor = iminor(filp->f_path.dentry->d_inode);
 
-  if(len > MESS_MAX_SIZE){
-    log_dev_err(Major, minor, "Trying to write message bigger than MAX_SIZE");
-    return 0;
-  }
-
-  mail = &(instances.instances[minor]);
-  mess = kmalloc(sizeof(message), GFP_KERNEL);
-  if(!mess){
-    log_alert("Failed message struct alloc");
-    return 0;
-  }
-
-  mess->content = kmalloc(sizeof(char) * MESS_MAX_SIZE, GFP_KERNEL);
-  if(!mess->content){
-    log_alert("Failed message content alloc");
-    return 0;
-  }
-
-  copy_from_user(mess->content, buff, len);
-  log_info(mess->content);
+  mess = create_message(minor,buff,len);
+  if(!mess) return -1;
+  add_mess_to_mail(minor, mess);
 
   return len;
 
@@ -117,7 +172,8 @@ int __init init_module(void){
 
   for(i = 0; i < MAIL_INSTANCES; i++){
       mail = &(instances.instances[i]);
-      atomic_set(&(mail->len), 0);
+      mail->len = 0;
+      mail->size = 0;
       INIT_LIST_HEAD(&mail->mess_list);
   }
 

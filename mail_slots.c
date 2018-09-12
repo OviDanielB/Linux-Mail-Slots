@@ -88,6 +88,7 @@ void add_mess_to_mail(mailslot *mail, message *mess){
   list_add_tail(&mess->list, &mail->mess_list);
   new_size = mail->size + mess->len;
   mail->size = new_size;
+  mail->n_mess++;
 
   int j = 0;
   message *m;
@@ -161,15 +162,74 @@ ssize_t write_mail(struct file *filp,
   wake_up_interruptible(&mail->rq);
 
   return len;
+}
 
+int mess_to_read(mailslot *mail){
+  return mail->n_mess;
+}
+
+message *first_message(mailslot *mail){
+  message *m;
+  list_for_each_entry(m, &mail->mess_list, list){
+    log_debug("Getting first message in list");
+    log_debug(m->content);
+    return m; /* first element */
+  }
 }
 
 ssize_t read_mail(struct file *filp,
-  char *bugg, size_t len, loff_t *off){
+  char *buff, size_t len, loff_t *off){
     int minor;
+    mailslot *mail;
+    message *mess;
 
     log_debug("Read");
     minor = iminor(filp->f_path.dentry->d_inode);
+    mail = mail_of(minor);
+
+    if( down_interruptible(&mail->sem))
+      return -ERESTARTSYS;
+
+    //while(mess_to_read(mail) == 0){
+    while(list_empty(&mail->mess_list)){
+      up(&mail->sem);
+      /* blocking if happens */
+      if( wait_event_interruptible(mail->rq, !list_empty(&mail->mess_list) ))
+        return -ERESTARTSYS;
+
+      if( down_interruptible(&mail->sem))
+        return -ERESTARTSYS;
+    }
+
+    mess = first_message(mail);
+    if(len < mess->len){
+      up(&mail->sem);
+      /* wake other readers and see if their request can be satisfied */
+      wake_up_interruptible(&mail->rq);
+      return -EINVAL;
+    }
+
+    if( copy_to_user(buff, mess->content, mess->len) ){
+      up(&mail->sem);
+      return -EFAULT;
+    }
+
+    log_debug("Deleting node");
+    log_debug(mess->content);
+
+    list_del_init(&mess->list);
+
+    log_debug("New list without deleted element");
+    message *m;
+    list_for_each_entry(m, &mail->mess_list, list){
+      log_debug(m->content);
+      return m; /* first element */
+    }
+
+    up(&mail->sem);
+    /* wake up writers */
+    wake_up_interruptible(&mail->wq);
+
     return len;
 }
 

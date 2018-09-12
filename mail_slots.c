@@ -77,7 +77,7 @@ int fill_message(message *mess, const char *buff, int len){
   mess->content[m_len - 1] = '\0';
   mess->len = m_len;
 
-  log_debug("Message created");
+  log_debug("Message filled");
   return 0;
 }
 
@@ -131,17 +131,22 @@ ssize_t write_mail(struct file *filp,
   minor = iminor(filp->f_path.dentry->d_inode);
   mail = mail_of(minor);
 
+  log_debug("WRITE trying sem");
   if(down_interruptible(&mail->sem))
     return -ERESTARTSYS;
 
+  log_debug("WRITE got sem");
   while(free_space(mail) == 0){  /* mail full */
     up(&mail->sem);
-
+    log_debug("WRITE mail full");
+    log_debug("WRITE waiting on event");
     if( wait_event_interruptible(mail->wq, free_space(mail) > 0))
       return -ERESTARTSYS;  /* signal: tell the fs layer to handle it */
-
-    if( down_interruptible(&mail->sem))
+    log_debug("WRITE woke from queue");
+    log_debug("WRITE trying sem cycle");
+    if( down_interruptible(&mail->sem) )
       return -ERESTARTSYS;
+    log_debug("WRITE got sem cycle");
   }
 
   mess = kmalloc(sizeof(message), GFP_KERNEL);
@@ -149,6 +154,7 @@ ssize_t write_mail(struct file *filp,
     log_alert("Failed message struct alloc");
     return -ENOMEM;
   }
+  log_debug("Message created");
 
   ret = fill_message(mess,buff,len);
   if(ret){
@@ -177,6 +183,20 @@ message *first_message(mailslot *mail){
   }
 }
 
+void delete_mess_from_mail(message *mess, mailslot *mail){
+  log_debug("Deleting node");
+  log_debug(mess->content);
+  /* delete and reconstruct list */
+  list_del_init(&mess->list);
+  mail->size = mail->size - mess->len;
+
+  log_debug("New list without deleted element");
+  message *m;
+  list_for_each_entry(m, &mail->mess_list, list){
+    log_debug(m->content);
+  }
+}
+
 ssize_t read_mail(struct file *filp,
   char *buff, size_t len, loff_t *off){
     int minor;
@@ -187,18 +207,23 @@ ssize_t read_mail(struct file *filp,
     minor = iminor(filp->f_path.dentry->d_inode);
     mail = mail_of(minor);
 
+    log_debug("READ trying sem");
     if( down_interruptible(&mail->sem))
       return -ERESTARTSYS;
-
+    log_debug("READ got sem");
     //while(mess_to_read(mail) == 0){
     while(list_empty(&mail->mess_list)){
+      log_debug("READ mail empty");
       up(&mail->sem);
       /* blocking if happens */
+      log_debug("READ waiting");
       if( wait_event_interruptible(mail->rq, !list_empty(&mail->mess_list) ))
         return -ERESTARTSYS;
-
+      log_debug("READ woke from queue ");
+      log_debug("READ trying sem cycle");
       if( down_interruptible(&mail->sem))
         return -ERESTARTSYS;
+      log_debug("READ got sem cycle");
     }
 
     mess = first_message(mail);
@@ -214,17 +239,7 @@ ssize_t read_mail(struct file *filp,
       return -EFAULT;
     }
 
-    log_debug("Deleting node");
-    log_debug(mess->content);
-
-    list_del_init(&mess->list);
-
-    log_debug("New list without deleted element");
-    message *m;
-    list_for_each_entry(m, &mail->mess_list, list){
-      log_debug(m->content);
-      return m; /* first element */
-    }
+    delete_mess_from_mail(mess, mail);
 
     up(&mail->sem);
     /* wake up writers */

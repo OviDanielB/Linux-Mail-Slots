@@ -13,10 +13,11 @@ typedef struct message {
 
 typedef struct mailslot {
   struct list_head mess_list;
-  long size;
-  int len;
-  spinlock_t lock;
-
+  int n_mess;                  /* number of messages present */
+  int size;                    /* storage occupied by all messages */
+  int minor;                   /* minor number associated with mailslot */
+  struct semaphore sem;        /* mutual exclusion semaphore */
+  wait_queue_head_t rq, wq;    /* read and write wait queues */
 } mailslot;
 
 typedef struct mail_instances {

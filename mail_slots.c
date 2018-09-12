@@ -4,9 +4,11 @@
 #include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/stat.h>
-#include <linux/slab.h>		/* For kmalloc */
+#include <linux/slab.h>		     /* For kmalloc */
 #include <linux/fs.h>
-#include <asm/uaccess.h>	/* for put_user */
+#include <linux/wait.h>        /* For wait queues */
+#include <linux/semaphore.h>
+#include <asm/uaccess.h>	     /* for put_user */
 
 #include "utils/log.h"
 #include "utils/conf.h"
@@ -53,29 +55,8 @@ mailslot *mail_of(int minor){
   return &(instances.instances[minor]);
 }
 
-int enough_space(int minor, int len){
-  mailslot *mail;
-  mail = mail_of(minor);
-  if(len > MESS_MAX_SIZE){
-    log_dev_err(Major, minor, "Trying to write message bigger than MAX_SIZE");
-    return 0;
-  }
-  if(mail->size + len > MAIL_INSTANCE_MAX_STORAGE){
-    log_dev_err(Major, minor, "Not enough space to write message");
-    return 0;
-  }
-  return 1;
-}
-
-message *create_message(int minor, const char *buff, int len){
-  message *mess;
-
+int fill_message(message *mess, const char *buff, int len){
   size_t m_len;
-  int ret;
-
-  if(!enough_space(minor,len)){
-    return NULL;
-  }
 
   if(buff[len-1] == '\0'){
     m_len = len;
@@ -83,35 +64,30 @@ message *create_message(int minor, const char *buff, int len){
     m_len = len + 1;
   }
 
-  mess = kmalloc(sizeof(message), GFP_KERNEL);
-  if(!mess){
-    log_alert("Failed message struct alloc");
-    return NULL;
-  }
-
   mess->content = kmalloc(sizeof(char) * m_len, GFP_KERNEL);
   if(!mess->content){
     log_alert("Failed message content alloc");
-    return NULL;
+    return -ENOMEM;
   }
 
-  ret = copy_from_user(mess->content, buff, len);
-  if(ret < 0){
+  if(copy_from_user(mess->content, buff, len)){
     log_error("Copy from user");
-    return NULL;
+    return -EFAULT;
   }
   mess->content[m_len - 1] = '\0';
   mess->len = m_len;
 
   log_debug("Message created");
-  return mess;
+  return 0;
 }
 
-void add_mess_to_mail(int minor, message *mess){
-  mailslot *mail;
+void add_mess_to_mail(mailslot *mail, message *mess){
+  int new_size;
 
-  mail = mail_of(minor);
+  //printk(KERN_INFO "%d %s\n", 0, mess->content);
   list_add_tail(&mess->list, &mail->mess_list);
+  new_size = mail->size + mess->len;
+  mail->size = new_size;
 
   int j = 0;
   message *m;
@@ -121,18 +97,68 @@ void add_mess_to_mail(int minor, message *mess){
   }
 }
 
+int free_space(mailslot *mail){
+  int f_space;
+  f_space = MAIL_INSTANCE_MAX_STORAGE - mail->size;
+  if(f_space <= 0){ /* if max_storage changed dynamically, f_space can be < 0 */
+    log_dev_err(Major, mail->minor, "Not enough space to write message");
+    return 0;
+  }
+  return f_space;
+}
+
+int mess_params_compliant(int len){
+  if(len > MESS_MAX_SIZE){
+    log_dev_err(Major, -1 , "Trying to write message bigger than MESS_MAX_SIZE");
+    return 0;
+  }
+  return 1;
+}
+
 ssize_t write_mail(struct file *filp,
   const char *buff, size_t len, loff_t *off){
-  int minor, ret;
 
+  int minor, ret;
+  mailslot *mail;
   message *mess;
+
+  if(!mess_params_compliant(len)){
+    return -EOVERFLOW;   /* mess too big */
+  }
 
   log_debug("Write");
   minor = iminor(filp->f_path.dentry->d_inode);
+  mail = mail_of(minor);
 
-  mess = create_message(minor,buff,len);
-  if(!mess) return -1;
-  add_mess_to_mail(minor, mess);
+  if(down_interruptible(&mail->sem))
+    return -ERESTARTSYS;
+
+  while(free_space(mail) == 0){  /* mail full */
+    up(&mail->sem);
+
+    if( wait_event_interruptible(mail->wq, free_space(mail) > 0))
+      return -ERESTARTSYS;  /* signal: tell the fs layer to handle it */
+
+    if( down_interruptible(&mail->sem))
+      return -ERESTARTSYS;
+  }
+
+  mess = kmalloc(sizeof(message), GFP_KERNEL);
+  if(!mess){
+    log_alert("Failed message struct alloc");
+    return -ENOMEM;
+  }
+
+  ret = fill_message(mess,buff,len);
+  if(ret){
+    up(&mail->sem);
+    return ret;
+  }
+  add_mess_to_mail(mail, mess);
+  up(&mail->sem);
+
+  /* wake up any reader */
+  wake_up_interruptible(&mail->rq);
 
   return len;
 
@@ -171,42 +197,17 @@ int __init init_module(void){
   log_dev(Major, -1, "registration succedded");
 
   for(i = 0; i < MAIL_INSTANCES; i++){
-      mail = &(instances.instances[i]);
-      mail->len = 0;
+      mail = mail_of(i);
+      mail->minor = i;
       mail->size = 0;
+      mail->n_mess = 0;
       INIT_LIST_HEAD(&mail->mess_list);
+      sema_init(&mail->sem, 1);           /* initially unlocked */
+      init_waitqueue_head(&mail->rq);
+      init_waitqueue_head(&mail->wq);
   }
+  atomic_set(&(instances.n_occupied), 0);
 
-  mailslot *m = kmalloc(sizeof(mailslot), GFP_KERNEL);
-  if(!m){
-    log_error("Error in allocating maislot");
-    return 1;
-  }
-  INIT_LIST_HEAD(&m->mess_list);
-
-  message m1 = {
-    .content = "Hello",
-    .len = 1,
-  };
-
-  message m2 = {
-    .content = "World",
-    .len = 2,
-  };
-
-  message m3 = {
-    .content = "I'm Ovi",
-    .len = 2,
-  };
-
-  list_add_tail(&m1.list, &m->mess_list);
-  list_add_tail(&m2.list, &m->mess_list);
-  list_add_tail(&m3.list, &m->mess_list);
-
-  message *mess;
-  list_for_each_entry(mess, &m->mess_list, list){
-    log_info(mess->content);
-  }
 
   log_info("Module ready");
   return 0;

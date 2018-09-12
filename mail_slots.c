@@ -8,11 +8,14 @@
 #include <linux/fs.h>
 #include <linux/wait.h>        /* For wait queues */
 #include <linux/semaphore.h>
+#include <linux/ioctl.h>
 #include <asm/uaccess.h>	     /* for put_user */
 
 #include "utils/log.h"
 #include "utils/conf.h"
 #include "mail_structures.h"
+#include "mailslot.h"
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ovidiu Daniel Barba <ovi.daniel.b@gmail.com>");
@@ -33,6 +36,76 @@ MODULE_PARM_DESC(myArray, "Array of ints");
 
 static int Major;
 static mail_instances instances;
+
+/* maximum message size; default is in conf.h. can be changed with ioctl */
+static int max_mess_size = MESS_MAX_SIZE;
+/* max storage for every mailslot instance */
+static int mail_max_storage = MAIL_INSTANCE_MAX_STORAGE;
+
+static int blocking_read = MS_BLOCK_ENABLED;
+static int blocking_write = MS_BLOCK_ENABLED;
+
+
+long ioctl_mail(struct file *file,
+  unsigned int cmd, unsigned long arg){
+    int err = 0, ret = 0;
+    /*
+     * If command type is different than this driver's or its
+     * number doesn't exist, return ENOTTY (inappropriate ioctl)
+     */
+    if( _IOC_TYPE(cmd) != MS_IOC_MAGIC ) return -ENOTTY;
+    if( _IOC_NR(cmd) > MS_IOC_MAX_NUM ) return -ENOTTY;
+
+    /* ioctl direction is on the user's perspective */
+    if( _IOC_DIR(cmd) & _IOC_READ)
+      /* check if the location pointed to can be written */
+      err = !access_ok(VERIFIY_WRITE, (void *)arg, _IOC_SIZE(cmd));
+    if( _IOC_DIR(cmd) & _IOC_WRITE)
+      /* check if the location pointed to can be read */
+      err = !access_ok(VERIFY_READ, (void *)arg, _IOC_SIZE(cmd));
+    if(err){
+      log_error("User space address passed to ioctl is invalid");
+      return -EFAULT;
+    }
+
+    switch (cmd) {
+
+      case MS_IOC_SMESS_SIZE:
+        log_debug("Called MAILSLOT_IOC_SMESS_SIZE");
+        ret = __get_user(max_mess_size, (int *) arg);
+        printk(KERN_INFO "Max mess size set to %d\n", max_mess_size);
+        break;
+
+      case MS_IOC_GMESS_SIZE:
+        log_debug("Called MAILSLOT_IOC_GMESS_SIZE");
+        ret = __put_user(max_mess_size, (int *) arg);
+        break;
+
+      case MS_IOC_SBLOCKING_READ:
+        log_debug("Called MS_IOC_SBLOCKING_READ");
+        ret = __get_user(blocking_read, (int *) arg);
+        break;
+
+      case MS_IOC_GBLOCKING_READ:
+        log_debug("Called MS_IOC_GBLOCKING_READ");
+        ret = __put_user(blocking_read, (int *) arg);
+        break;
+
+      case MS_IOC_SBLOCKING_WRITE:
+        log_debug("Called MS_IOC_SBLOCKING_WRITE");
+        ret = __get_user(blocking_write, (int *) arg);
+        break;
+
+      case MS_IOC_GBLOCKING_WRITE:
+        log_debug("Called MS_IOC_GBLOCKING_WRITE");
+        ret = __put_user(blocking_write, (int *) arg);
+        break;
+
+      default:
+        ret = -ENOTTY;
+    }
+    return ret;
+  }
 
 int open_mail(struct inode *node, struct file *filp){
   int minor;
@@ -100,8 +173,9 @@ void add_mess_to_mail(mailslot *mail, message *mess){
 
 int free_space(mailslot *mail){
   int f_space;
-  f_space = MAIL_INSTANCE_MAX_STORAGE - mail->size;
-  if(f_space <= 0){ /* if max_storage changed dynamically, f_space can be < 0 */
+  f_space = mail_max_storage - mail->size;
+  if(f_space <= 0){
+    /* if max_storage changed dynamically with ioctl, f_space can be < 0 */
     log_dev_err(Major, mail->minor, "Not enough space to write message");
     return 0;
   }
@@ -109,7 +183,7 @@ int free_space(mailslot *mail){
 }
 
 int mess_params_compliant(int len){
-  if(len > MESS_MAX_SIZE){
+  if(len > max_mess_size){
     log_dev_err(Major, -1 , "Trying to write message bigger than MESS_MAX_SIZE");
     return 0;
   }
@@ -254,6 +328,7 @@ static struct file_operations fops = {
   .write = write_mail,
   .open = open_mail,
   .release = release_mail,
+  .unlocked_ioctl = ioctl_mail,
 };
 /* more portable solution */
 //SET_MODULE_OWNER(&fops);

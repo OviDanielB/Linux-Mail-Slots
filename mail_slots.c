@@ -21,18 +21,18 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ovidiu Daniel Barba <ovi.daniel.b@gmail.com>");
 MODULE_DESCRIPTION("Brief Modules Description");
 
-static int myint = 0;
-static char *string = "";
-static int myArray[2] = {-1, +1};
-static int arrlen = 0;
+static int max_instances = MAIL_INSTANCES;
+static int minor_bott = MINOR_RANGE_BOTTOM;
+static int minor_top = MINOR_RANGE_TOP;
 
-module_param(myint, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-MODULE_PARM_DESC(myint, "Visible and writable int");
-module_param(string, charp, 0000);
-MODULE_PARM_DESC(string, "Hidden string");
+/*module_param(max_instances, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(myint, "Max number of mailslot instances handled by the driver"); */
 
-module_param_array(myArray, int, &arrlen, S_IRUSR | S_IWUSR);
-MODULE_PARM_DESC(myArray, "Array of ints");
+module_param(minor_bott, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(minor_bott, "Driver minor number range bottom");
+
+module_param(minor_top, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(minor_top, "Driver minor number range top");
 
 static int Major;
 static mail_instances instances;
@@ -44,6 +44,10 @@ static int mail_max_storage = MAIL_INSTANCE_MAX_STORAGE;
 
 static int blocking_read = MS_BLOCK_ENABLED;
 static int blocking_write = MS_BLOCK_ENABLED;
+
+mailslot *mail_of(int minor){
+  return &(instances.instances[minor - minor_bott]);
+}
 
 
 long ioctl_mail(struct file *file,
@@ -108,11 +112,16 @@ long ioctl_mail(struct file *file,
   }
 
 int open_mail(struct inode *node, struct file *filp){
-  int minor;
+  int minor, occupied_instances;
+  mailslot *mail;
 
   log_debug("Open");
   minor = MINOR(node->i_rdev);
+  mail = mail_of(minor);
+
+
   log_dev(Major, minor, "Opened");
+
   return 0;
 }
 
@@ -124,9 +133,7 @@ int release_mail(struct inode *node, struct file *filp){
   return 0;
 }
 
-mailslot *mail_of(int minor){
-  return &(instances.instances[minor]);
-}
+
 
 int fill_message(message *mess, const char *buff, int len){
   size_t m_len;
@@ -190,10 +197,31 @@ int mess_params_compliant(int len){
   return 1;
 }
 
+message *alloc_mess(void){
+  message *mess;
+  mess = kmalloc(sizeof(message), GFP_KERNEL);
+  if(!mess){
+    log_alert("Failed message struct alloc");
+    return NULL;
+  }
+  log_debug("Message created");
+  return mess;
+}
+
+/* free previously allocated kernel memory */
+void dealloc_mess(message *mess){
+  kfree(mess->content);
+  kfree(mess);
+}
+
+int dev_minor(struct file *filp){
+  return iminor(filp->f_path.dentry->d_inode);
+}
+
 ssize_t write_mail(struct file *filp,
   const char *buff, size_t len, loff_t *off){
 
-  int minor, ret;
+  int ret;
   mailslot *mail;
   message *mess;
 
@@ -202,8 +230,19 @@ ssize_t write_mail(struct file *filp,
   }
 
   log_debug("Write");
-  minor = iminor(filp->f_path.dentry->d_inode);
-  mail = mail_of(minor);
+  mail = mail_of(dev_minor(filp));
+
+  /* message creation and copy from user buffer is done
+   * before taking the semaphore;
+   * it would occupy the mailslot without reason
+   */
+  mess = alloc_mess();
+  if(!mess)
+    return -ENOMEM;
+
+  ret = fill_message(mess,buff,len);
+  if(ret)
+    return ret;
 
   log_debug("WRITE trying sem");
   if(down_interruptible(&mail->sem))
@@ -223,18 +262,6 @@ ssize_t write_mail(struct file *filp,
     log_debug("WRITE got sem cycle");
   }
 
-  mess = kmalloc(sizeof(message), GFP_KERNEL);
-  if(!mess){
-    log_alert("Failed message struct alloc");
-    return -ENOMEM;
-  }
-  log_debug("Message created");
-
-  ret = fill_message(mess,buff,len);
-  if(ret){
-    up(&mail->sem);
-    return ret;
-  }
   add_mess_to_mail(mail, mess);
   up(&mail->sem);
 
@@ -257,7 +284,7 @@ message *first_message(mailslot *mail){
   }
 }
 
-void delete_mess_from_mail(message *mess, mailslot *mail){
+void detach_mess_from_mail(message *mess, mailslot *mail){
   log_debug("Deleting node");
   log_debug(mess->content);
   /* delete and reconstruct list */
@@ -273,13 +300,11 @@ void delete_mess_from_mail(message *mess, mailslot *mail){
 
 ssize_t read_mail(struct file *filp,
   char *buff, size_t len, loff_t *off){
-    int minor;
     mailslot *mail;
     message *mess;
 
     log_debug("Read");
-    minor = iminor(filp->f_path.dentry->d_inode);
-    mail = mail_of(minor);
+    mail = mail_of(dev_minor(filp));
 
     log_debug("READ trying sem");
     if( down_interruptible(&mail->sem))
@@ -307,46 +332,68 @@ ssize_t read_mail(struct file *filp,
       wake_up_interruptible(&mail->rq);
       return -EINVAL;
     }
-
-    if( copy_to_user(buff, mess->content, mess->len) ){
-      up(&mail->sem);
-      return -EFAULT;
-    }
-
-    delete_mess_from_mail(mess, mail);
+    detach_mess_from_mail(mess, mail);
 
     up(&mail->sem);
     /* wake up writers */
     wake_up_interruptible(&mail->wq);
 
-    return len;
+    /* copy mess to user after releasing sempahore to allow
+     * others to take it faster
+     */
+    if( copy_to_user(buff, mess->content, mess->len) ){
+      up(&mail->sem);
+      return -EFAULT;
+    }
+    dealloc_mess(mess);
+
+    return mess->len;
 }
 
 
 static struct file_operations fops = {
-  .read = read_mail,
-  .write = write_mail,
-  .open = open_mail,
-  .release = release_mail,
+  .read =           read_mail,
+  .write =          write_mail,
+  .open =           open_mail,
+  .release =        release_mail,
   .unlocked_ioctl = ioctl_mail,
+  .owner =          THIS_MODULE,
 };
 /* more portable solution */
-//SET_MODULE_OWNER(&fops);
+//SET_MODULE_OWNER(fops);
 
 int __init init_module(void){
-  int i;
+  int i, range;
   mailslot *mail;
   log_info("Module init");
 
+  if(minor_bott < 0 || minor_top < 0 || max_instances < 0){
+    log_error("No MailSlot module param can be negative");
+    return -EINVAL;
+  }
+  range = minor_top - minor_bott;
+  if(range <= 0 ){
+    log_error("Minor range can't <= 0");
+    return -EINVAL;
+  }
+
+  /* max num of handled instances is TOP - BOTTOM ;
+   * if params not passed to module init , defult config values
+   * are used
+   */
+  max_instances = range;
+
+  printk(KERN_INFO "%s-%s: Device minor number ranges from %d to %d with %d max instances.\n", MOD_NAME,VERSION,minor_bott, minor_top, max_instances);
+
   Major = register_chrdev(DEVICE_MAJOR, DEVICE_NAME, &fops);
   if(Major < 0){
-    log_dev(DEVICE_MAJOR, -1, "registration failed");
+    log_dev(DEVICE_MAJOR, -1, "Registration failed");
     log_alert("Module not registered");
     return 1;
   }
-  log_dev(Major, -1, "registration succedded");
+  log_dev(Major, -1, "Registration succedded");
 
-  for(i = 0; i < MAIL_INSTANCES; i++){
+  for(i = 0; i < max_instances; i++){
       mail = mail_of(i);
       mail->minor = i;
       mail->size = 0;
@@ -356,7 +403,6 @@ int __init init_module(void){
       init_waitqueue_head(&mail->rq);
       init_waitqueue_head(&mail->wq);
   }
-  atomic_set(&(instances.n_occupied), 0);
 
 
   log_info("Module ready");

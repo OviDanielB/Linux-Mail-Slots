@@ -22,8 +22,7 @@ typedef struct mailslot {
 
 typedef struct mail_instances {
   mailslot instances[MAIL_INSTANCES];
-  atomic_t n_occupied;
-
+  
 } mail_instances;
 
 #endif

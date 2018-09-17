@@ -22,7 +22,12 @@ typedef struct mailslot {
 
 typedef struct mail_instances {
   mailslot instances[MAIL_INSTANCES];
-  
+
 } mail_instances;
+
+typedef struct session_opt {
+  unsigned short blocking;
+
+} session_opt;
 
 #endif

@@ -114,14 +114,31 @@ long ioctl_mail(struct file *file,
 int open_mail(struct inode *node, struct file *filp){
   int minor, occupied_instances;
   mailslot *mail;
+  session_opt *so;
 
   log_debug("Open");
   minor = MINOR(node->i_rdev);
   mail = mail_of(minor);
 
 
-  log_dev(Major, minor, "Opened");
+  so = kmalloc(sizeof(session_opt), GFP_KERNEL);
+  if(!so){
+    log_dev_err(Major, minor, "Allocating file_options struct");
+    return -ENOMEM;
+  }
 
+  if(filp->f_flags & O_NONBLOCK){
+    log_debug("Dev opened with O_NONBLOCK");
+    so->blocking = 0;
+  } else {
+    log_debug("Dev opened with blocking mode");
+    so->blocking = 1;
+  }
+
+  /* set session options */
+  filp->private_data = so;
+
+  log_dev(Major, minor, "Opened successfully");
   return 0;
 }
 
@@ -129,7 +146,17 @@ int release_mail(struct inode *node, struct file *filp){
   int minor;
   log_debug("Release");
   minor = MINOR(node->i_rdev);
-  log_dev(Major, minor, "Released");
+
+  session_opt *so = (session_opt *) filp->private_data;
+  if(!so){
+    /* debug purpose */
+    log_dev_err(Major, minor, "Session options should not be null");
+  } else {
+    log_debug("Freeing session_opt struct");
+    kfree(so);
+  }
+
+  log_dev(Major, minor, "Released successfully");
   return 0;
 }
 

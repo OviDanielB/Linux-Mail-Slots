@@ -27,8 +27,8 @@ typedef struct mail_instances {
 } mail_instances;
 
 typedef struct session_opt {
-  unsigned short bl_r;
-  unsigned short bl_w;
+  int bl_r;
+  int bl_w;
 } session_opt;
 
 #endif

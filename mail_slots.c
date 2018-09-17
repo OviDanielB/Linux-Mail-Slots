@@ -53,6 +53,43 @@ int dev_minor(struct file *filp){
   return iminor(filp->f_path.dentry->d_inode);
 }
 
+int minor_ok(int minor){
+  if(minor >= minor_bott && minor <= minor_top)
+    return 1;
+  return 0;
+}
+
+int is_read_blocking(struct file *filp){
+  session_opt *so;
+
+  so = (session_opt *) filp->private_data;
+  if(!so){
+    log_error("Session options are null");
+    return MS_BLOCK_ENABLED;       /* return default blocking mode */
+  }
+  return so->bl_r;
+}
+
+int is_write_blocking(struct file *filp){
+  session_opt *so;
+
+  so = (session_opt *) filp->private_data;
+  if(!so){
+    log_error("Session options are null");
+    return MS_BLOCK_ENABLED;       /* return default blocking mode */
+  }
+  return so->bl_w;
+}
+
+void print_mess_list(struct list_head *head){
+  int j = 0;
+  message *m;
+  list_for_each_entry(m, head, list){
+    printk(KERN_INFO " pos: %d - cont: %s - len: %d\n", j, m->content, m->len);
+    j++;
+  }
+}
+
 long ioctl_mail(struct file *file,
   unsigned int cmd, unsigned long arg){
 
@@ -157,8 +194,13 @@ int open_mail(struct inode *node, struct file *filp){
 
   log_debug("Open");
   minor = MINOR(node->i_rdev);
-  mail = mail_of(minor);
 
+  if(!minor_ok(minor)){
+    log_error("Trying to open device with minor not in correct range");
+    return -EINVAL;
+  }
+
+  mail = mail_of(minor);
 
   so = kmalloc(sizeof(session_opt), GFP_KERNEL);
   if(!so){
@@ -173,7 +215,6 @@ int open_mail(struct inode *node, struct file *filp){
     log_debug("Dev opened with blocking mode");
     so->bl_r = 1; so->bl_w = 1;
   }
-
   /* set session options */
   filp->private_data = so;
 
@@ -183,10 +224,11 @@ int open_mail(struct inode *node, struct file *filp){
 
 int release_mail(struct inode *node, struct file *filp){
   int minor;
+  session_opt *so;
+
   log_debug("Release");
   minor = MINOR(node->i_rdev);
-
-  session_opt *so = (session_opt *) filp->private_data;
+  so = (session_opt *) filp->private_data;
   if(!so){
     /* debug purpose */
     log_dev_err(Major, minor, "Session options should not be null");
@@ -236,12 +278,7 @@ void add_mess_to_mail(mailslot *mail, message *mess){
   mail->size = new_size;
   mail->n_mess++;
 
-  int j = 0;
-  message *m;
-  list_for_each_entry(m, &mail->mess_list, list){
-    printk(KERN_INFO "%d %s\n", j, m->content);
-    j++;
-  }
+  print_mess_list(&mail->mess_list);
 }
 
 int free_space(mailslot *mail){
@@ -307,22 +344,22 @@ ssize_t write_mail(struct file *filp,
   if(ret)
     return ret;
 
-  log_debug("WRITE trying sem");
+
   if(down_interruptible(&mail->sem))
     return -ERESTARTSYS;
 
-  log_debug("WRITE got sem");
   while(free_space(mail) == 0){  /* mail full */
     up(&mail->sem);
-    log_debug("WRITE mail full");
-    log_debug("WRITE waiting on event");
-    if( wait_event_interruptible(mail->wq, free_space(mail) > 0))
+
+    if(is_write_blocking(filp))
+      return -EAGAIN;
+
+    if(wait_event_interruptible(mail->wq, free_space(mail) > 0))
       return -ERESTARTSYS;  /* signal: tell the fs layer to handle it */
-    log_debug("WRITE woke from queue");
-    log_debug("WRITE trying sem cycle");
-    if( down_interruptible(&mail->sem) )
+
+    if(down_interruptible(&mail->sem))
       return -ERESTARTSYS;
-    log_debug("WRITE got sem cycle");
+
   }
 
   add_mess_to_mail(mail, mess);
@@ -366,26 +403,20 @@ ssize_t read_mail(struct file *filp,
     mailslot *mail;
     message *mess;
 
-    log_debug("Read");
     mail = mail_of(dev_minor(filp));
 
-    log_debug("READ trying sem");
-    if( down_interruptible(&mail->sem))
+    if(down_interruptible(&mail->sem))
       return -ERESTARTSYS;
-    log_debug("READ got sem");
-    //while(mess_to_read(mail) == 0){
+
     while(list_empty(&mail->mess_list)){
-      log_debug("READ mail empty");
       up(&mail->sem);
       /* blocking if happens */
-      log_debug("READ waiting");
+      if(is_read_blocking(filp))
+        return -EAGAIN;
       if( wait_event_interruptible(mail->rq, !list_empty(&mail->mess_list) ))
         return -ERESTARTSYS;
-      log_debug("READ woke from queue ");
-      log_debug("READ trying sem cycle");
       if( down_interruptible(&mail->sem))
         return -ERESTARTSYS;
-      log_debug("READ got sem cycle");
     }
 
     mess = first_message(mail);
@@ -396,15 +427,13 @@ ssize_t read_mail(struct file *filp,
       return -EINVAL;
     }
     detach_mess_from_mail(mess, mail);
-
     up(&mail->sem);
     /* wake up writers */
     wake_up_interruptible(&mail->wq);
-
     /* copy mess to user after releasing sempahore to allow
      * others to take it faster
      */
-    if( copy_to_user(buff, mess->content, mess->len) ){
+    if(copy_to_user(buff, mess->content, mess->len) ){
       up(&mail->sem);
       return -EFAULT;
     }

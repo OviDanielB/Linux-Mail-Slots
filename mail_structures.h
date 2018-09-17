@@ -13,6 +13,7 @@ typedef struct message {
 
 typedef struct mailslot {
   struct list_head mess_list;
+  int max_mess_size;           /* max mess size for specific mail instance */
   int n_mess;                  /* number of messages present */
   int size;                    /* storage occupied by all messages */
   int minor;                   /* minor number associated with mailslot */
@@ -26,8 +27,8 @@ typedef struct mail_instances {
 } mail_instances;
 
 typedef struct session_opt {
-  unsigned short blocking;
-
+  unsigned short bl_r;
+  unsigned short bl_w;
 } session_opt;
 
 #endif

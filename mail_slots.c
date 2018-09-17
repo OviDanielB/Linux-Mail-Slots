@@ -28,10 +28,10 @@ static int minor_top = MINOR_RANGE_TOP;
 /*module_param(max_instances, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(myint, "Max number of mailslot instances handled by the driver"); */
 
-module_param(minor_bott, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+module_param(minor_bott, int, S_IRUSR | S_IRGRP );
 MODULE_PARM_DESC(minor_bott, "Driver minor number range bottom");
 
-module_param(minor_top, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+module_param(minor_top, int, S_IRUSR | S_IRGRP );
 MODULE_PARM_DESC(minor_top, "Driver minor number range top");
 
 static int Major;
@@ -49,10 +49,16 @@ mailslot *mail_of(int minor){
   return &(instances.instances[minor - minor_bott]);
 }
 
+int dev_minor(struct file *filp){
+  return iminor(filp->f_path.dentry->d_inode);
+}
 
 long ioctl_mail(struct file *file,
   unsigned int cmd, unsigned long arg){
-    int err = 0, ret = 0;
+
+    int err = 0, ret = 0, minor, tmp_mess_size, tmp_blocking;
+    mailslot *mail;
+    session_opt *so;
     /*
      * If command type is different than this driver's or its
      * number doesn't exist, return ENOTTY (inappropriate ioctl)
@@ -72,37 +78,70 @@ long ioctl_mail(struct file *file,
       return -EFAULT;
     }
 
+    minor = dev_minor(file);
+    mail = mail_of(minor);
+    so = (session_opt *) file->private_data;
+
     switch (cmd) {
 
       case MS_IOC_SMESS_SIZE:
         log_debug("Called MAILSLOT_IOC_SMESS_SIZE");
-        ret = __get_user(max_mess_size, (int *) arg);
-        printk(KERN_INFO "Max mess size set to %d\n", max_mess_size);
+        ret = __get_user(tmp_mess_size, (int *) arg);
+        if(ret) return ret;
+        if(tmp_mess_size <= 0){
+          log_dev_err(Major, minor, "Trying to set max mess size <= 0");
+          ret = -EINVAL;
+          break;
+        }
+        if(down_interruptible(&mail->sem))
+          return -ERESTARTSYS;
+        mail->max_mess_size = tmp_mess_size;
+        printk(KERN_INFO "Max mess size set to %d for mail instance \n", mail->max_mess_size, minor);
+        up(&mail->sem);
         break;
 
       case MS_IOC_GMESS_SIZE:
         log_debug("Called MAILSLOT_IOC_GMESS_SIZE");
-        ret = __put_user(max_mess_size, (int *) arg);
+        if(down_interruptible(&mail->sem))
+          return -ERESTARTSYS;
+        ret = __put_user(mail->max_mess_size, (int *) arg);
+        up(&mail->sem);
         break;
 
       case MS_IOC_SBLOCKING_READ:
         log_debug("Called MS_IOC_SBLOCKING_READ");
-        ret = __get_user(blocking_read, (int *) arg);
+        ret = __get_user(tmp_blocking, (int *) arg);
+        if(ret) return ret;
+        if(ret != 0 && ret != 1){
+          log_dev_err(Major,minor, "Read blocking mode should be a boolean");
+          ret = -EINVAL;
+          break;
+        }
+        so->bl_r = tmp_blocking;
+        printk(KERN_INFO "Read blocking mode enabled is now %d (boolean).\n", so->bl_r);
         break;
 
       case MS_IOC_GBLOCKING_READ:
         log_debug("Called MS_IOC_GBLOCKING_READ");
-        ret = __put_user(blocking_read, (int *) arg);
+        ret = __put_user(so->bl_r, (int *) arg);
         break;
 
       case MS_IOC_SBLOCKING_WRITE:
         log_debug("Called MS_IOC_SBLOCKING_WRITE");
-        ret = __get_user(blocking_write, (int *) arg);
+        ret = __get_user(tmp_blocking, (int *) arg);
+        if(ret) return ret;
+        if(ret != 0 && ret != 1){
+          log_dev_err(Major,minor, "Write blocking mode should be a boolean");
+          ret = -EINVAL;
+          break;
+        }
+        so->bl_w = tmp_blocking;
+        printk(KERN_INFO "Write blocking mode enabled is now %d (boolean).\n", so->bl_w);
         break;
 
       case MS_IOC_GBLOCKING_WRITE:
         log_debug("Called MS_IOC_GBLOCKING_WRITE");
-        ret = __put_user(blocking_write, (int *) arg);
+        ret = __put_user(so->bl_w, (int *) arg);
         break;
 
       default:
@@ -129,10 +168,10 @@ int open_mail(struct inode *node, struct file *filp){
 
   if(filp->f_flags & O_NONBLOCK){
     log_debug("Dev opened with O_NONBLOCK");
-    so->blocking = 0;
+    so->bl_r = 0; so->bl_w = 0;
   } else {
     log_debug("Dev opened with blocking mode");
-    so->blocking = 1;
+    so->bl_r = 1; so->bl_w = 1;
   }
 
   /* set session options */
@@ -153,6 +192,7 @@ int release_mail(struct inode *node, struct file *filp){
     log_dev_err(Major, minor, "Session options should not be null");
   } else {
     log_debug("Freeing session_opt struct");
+    /* private data won't be freed by kernel . manual freeing required */
     kfree(so);
   }
 
@@ -191,7 +231,6 @@ int fill_message(message *mess, const char *buff, int len){
 void add_mess_to_mail(mailslot *mail, message *mess){
   int new_size;
 
-  //printk(KERN_INFO "%d %s\n", 0, mess->content);
   list_add_tail(&mess->list, &mail->mess_list);
   new_size = mail->size + mess->len;
   mail->size = new_size;
@@ -241,9 +280,6 @@ void dealloc_mess(message *mess){
   kfree(mess);
 }
 
-int dev_minor(struct file *filp){
-  return iminor(filp->f_path.dentry->d_inode);
-}
 
 ssize_t write_mail(struct file *filp,
   const char *buff, size_t len, loff_t *off){
@@ -425,8 +461,9 @@ int __init init_module(void){
       mail->minor = i;
       mail->size = 0;
       mail->n_mess = 0;
+      mail->max_mess_size = MESS_MAX_SIZE;    /* default max value used */
       INIT_LIST_HEAD(&mail->mess_list);
-      sema_init(&mail->sem, 1);           /* initially unlocked */
+      sema_init(&mail->sem, 1);               /* initially unlocked */
       init_waitqueue_head(&mail->rq);
       init_waitqueue_head(&mail->wq);
   }

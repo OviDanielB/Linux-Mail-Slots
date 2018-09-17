@@ -17,8 +17,11 @@
 #define MS_IOC_SMESS_SIZE         _IOW(MS_IOC_MAGIC, 5, int)
 #define MS_IOC_GMESS_SIZE         _IOR(MS_IOC_MAGIC, 6, int)
 
+#define MS_IOC_SMAX_STORAGE       _IOW(MS_IOC_MAGIC, 7, int)
+#define MS_IOC_GMAX_STORAGE       _IOR(MS_IOC_MAGIC, 8, int)
+
 /* used to check incoming commands */
-#define MS_IOC_MAX_NUM            6
+#define MS_IOC_MAX_NUM            8
 
 /* blocking or non blocking I/O */
 #define MS_BLOCK_ENABLED          1

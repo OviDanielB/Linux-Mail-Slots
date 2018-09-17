@@ -11,7 +11,7 @@
 int main() {
     char* dev="/dev/mail0\0";
     char* s="ciao\0";
-    int mess_size, blocking_read, blocking_write;
+    int mess_size, blocking_read, blocking_write, max_storage;
     printf("start %s\n", dev);
     int fd = open(dev, O_RDWR);
     if (fd < 0) {
@@ -43,6 +43,15 @@ int main() {
     blocking_write = MS_BLOCK_DISABLED;
     ioctl(fd, MS_IOC_SBLOCKING_WRITE, &blocking_write);
     printf("Set BLOCKING_WRITE = %d\n", blocking_write);
+
+    ioctl(fd, MS_IOC_GMAX_STORAGE, &max_storage);
+    printf("Got Max storage = %d\n", max_storage);
+
+    max_storage = max_storage + 10;
+    ioctl(fd, MS_IOC_SMAX_STORAGE, &max_storage);
+    printf("Set Max storage = %d\n", max_storage);
+
+
 
     close(fd);
     return 0;

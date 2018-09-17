@@ -25,9 +25,6 @@ static int max_instances = MAIL_INSTANCES;
 static int minor_bott = MINOR_RANGE_BOTTOM;
 static int minor_top = MINOR_RANGE_TOP;
 
-/*module_param(max_instances, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-MODULE_PARM_DESC(myint, "Max number of mailslot instances handled by the driver"); */
-
 module_param(minor_bott, int, S_IRUSR | S_IRGRP );
 MODULE_PARM_DESC(minor_bott, "Driver minor number range bottom");
 
@@ -36,14 +33,6 @@ MODULE_PARM_DESC(minor_top, "Driver minor number range top");
 
 static int Major;
 static mail_instances instances;
-
-/* maximum message size; default is in conf.h. can be changed with ioctl */
-static int max_mess_size = MESS_MAX_SIZE;
-/* max storage for every mailslot instance */
-static int mail_max_storage = MAIL_INSTANCE_MAX_STORAGE;
-
-static int blocking_read = MS_BLOCK_ENABLED;
-static int blocking_write = MS_BLOCK_ENABLED;
 
 mailslot *mail_of(int minor){
   return &(instances.instances[minor - minor_bott]);
@@ -59,7 +48,7 @@ int minor_ok(int minor){
   return 0;
 }
 
-int is_read_blocking(struct file *filp){
+int read_blocking_mode(struct file *filp){
   session_opt *so;
 
   so = (session_opt *) filp->private_data;
@@ -70,7 +59,7 @@ int is_read_blocking(struct file *filp){
   return so->bl_r;
 }
 
-int is_write_blocking(struct file *filp){
+int write_blocking_mode(struct file *filp){
   session_opt *so;
 
   so = (session_opt *) filp->private_data;
@@ -93,7 +82,9 @@ void print_mess_list(struct list_head *head){
 long ioctl_mail(struct file *file,
   unsigned int cmd, unsigned long arg){
 
-    int err = 0, ret = 0, minor, tmp_mess_size, tmp_blocking;
+    int err = 0, ret = 0;
+    int minor;
+    int tmp_mess_size, tmp_blocking, tmp_max_storage;
     mailslot *mail;
     session_opt *so;
     /*
@@ -106,10 +97,10 @@ long ioctl_mail(struct file *file,
     /* ioctl direction is on the user's perspective */
     if( _IOC_DIR(cmd) & _IOC_READ)
       /* check if the location pointed to can be written */
-      err = !access_ok(VERIFIY_WRITE, (void *)arg, _IOC_SIZE(cmd));
+      err = !access_ok(VERIFIY_WRITE, (void *) arg, _IOC_SIZE(cmd));
     if( _IOC_DIR(cmd) & _IOC_WRITE)
       /* check if the location pointed to can be read */
-      err = !access_ok(VERIFY_READ, (void *)arg, _IOC_SIZE(cmd));
+      err = !access_ok(VERIFY_READ, (void *) arg, _IOC_SIZE(cmd));
     if(err){
       log_error("User space address passed to ioctl is invalid");
       return -EFAULT;
@@ -133,7 +124,7 @@ long ioctl_mail(struct file *file,
         if(down_interruptible(&mail->sem))
           return -ERESTARTSYS;
         mail->max_mess_size = tmp_mess_size;
-        printk(KERN_INFO "Max mess size set to %d for mail instance \n", mail->max_mess_size, minor);
+        printk(KERN_INFO "Max mess size set to %d for mail instance %d.\n", mail->max_mess_size, minor);
         up(&mail->sem);
         break;
 
@@ -181,6 +172,21 @@ long ioctl_mail(struct file *file,
         ret = __put_user(so->bl_w, (int *) arg);
         break;
 
+      case MS_IOC_SMAX_STORAGE:
+        log_debug("Called MS_IOC_SMAX_STORAGE");
+        ret = __get_user(tmp_max_storage, (int *) arg);
+        if(ret) return ret;
+        if(tmp_max_storage <= 0) return -EINVAL;
+        if(down_interruptible(&mail->sem))
+          return -ERESTARTSYS;
+        mail->max_storage = tmp_max_storage;
+        printk(KERN_INFO "Max storage for mail %d is now set to %d.\n", minor, mail->max_storage);
+        up(&mail->sem);
+
+      case MS_IOC_GMAX_STORAGE:
+        log_debug("Called MS_IOC_SMAX_STORAGE");
+        ret = __put_user(mail->max_storage, (int *) arg);
+
       default:
         ret = -ENOTTY;
     }
@@ -188,7 +194,7 @@ long ioctl_mail(struct file *file,
   }
 
 int open_mail(struct inode *node, struct file *filp){
-  int minor, occupied_instances;
+  int minor;
   mailslot *mail;
   session_opt *so;
 
@@ -210,10 +216,12 @@ int open_mail(struct inode *node, struct file *filp){
 
   if(filp->f_flags & O_NONBLOCK){
     log_debug("Dev opened with O_NONBLOCK");
-    so->bl_r = 0; so->bl_w = 0;
+    so->bl_r = MS_BLOCK_DISABLED;
+    so->bl_w = MS_BLOCK_DISABLED;
   } else {
     log_debug("Dev opened with blocking mode");
-    so->bl_r = 1; so->bl_w = 1;
+    so->bl_r = MS_BLOCK_ENABLED;
+     so->bl_w = MS_BLOCK_ENABLED;
   }
   /* set session options */
   filp->private_data = so;
@@ -276,14 +284,13 @@ void add_mess_to_mail(mailslot *mail, message *mess){
   list_add_tail(&mess->list, &mail->mess_list);
   new_size = mail->size + mess->len;
   mail->size = new_size;
-  mail->n_mess++;
 
   print_mess_list(&mail->mess_list);
 }
 
 int free_space(mailslot *mail){
   int f_space;
-  f_space = mail_max_storage - mail->size;
+  f_space = mail->max_storage - mail->size;
   if(f_space <= 0){
     /* if max_storage changed dynamically with ioctl, f_space can be < 0 */
     log_dev_err(Major, mail->minor, "Not enough space to write message");
@@ -292,9 +299,9 @@ int free_space(mailslot *mail){
   return f_space;
 }
 
-int mess_params_compliant(int len){
-  if(len > max_mess_size){
-    log_dev_err(Major, -1 , "Trying to write message bigger than MESS_MAX_SIZE");
+int mess_params_compliant(int len, mailslot *mail){
+  if(len > mail->max_mess_size){
+    log_dev_err(Major, mail->minor , "Trying to write message bigger than MESS_MAX_SIZE");
     return 0;
   }
   return 1;
@@ -325,12 +332,13 @@ ssize_t write_mail(struct file *filp,
   mailslot *mail;
   message *mess;
 
-  if(!mess_params_compliant(len)){
+  log_debug("Write");
+  mail = mail_of(dev_minor(filp));
+
+  if(!mess_params_compliant(len,mail)){
     return -EOVERFLOW;   /* mess too big */
   }
 
-  log_debug("Write");
-  mail = mail_of(dev_minor(filp));
 
   /* message creation and copy from user buffer is done
    * before taking the semaphore;
@@ -339,40 +347,28 @@ ssize_t write_mail(struct file *filp,
   mess = alloc_mess();
   if(!mess)
     return -ENOMEM;
-
   ret = fill_message(mess,buff,len);
   if(ret)
     return ret;
-
-
   if(down_interruptible(&mail->sem))
     return -ERESTARTSYS;
 
   while(free_space(mail) == 0){  /* mail full */
     up(&mail->sem);
-
-    if(is_write_blocking(filp))
+    if(write_blocking_mode(filp) == MS_BLOCK_DISABLED)
       return -EAGAIN;
-
     if(wait_event_interruptible(mail->wq, free_space(mail) > 0))
       return -ERESTARTSYS;  /* signal: tell the fs layer to handle it */
-
     if(down_interruptible(&mail->sem))
       return -ERESTARTSYS;
-
   }
 
   add_mess_to_mail(mail, mess);
   up(&mail->sem);
-
   /* wake up any reader */
   wake_up_interruptible(&mail->rq);
 
   return len;
-}
-
-int mess_to_read(mailslot *mail){
-  return mail->n_mess;
 }
 
 message *first_message(mailslot *mail){
@@ -382,6 +378,7 @@ message *first_message(mailslot *mail){
     log_debug(m->content);
     return m; /* first element */
   }
+  return NULL;
 }
 
 void detach_mess_from_mail(message *mess, mailslot *mail){
@@ -392,10 +389,7 @@ void detach_mess_from_mail(message *mess, mailslot *mail){
   mail->size = mail->size - mess->len;
 
   log_debug("New list without deleted element");
-  message *m;
-  list_for_each_entry(m, &mail->mess_list, list){
-    log_debug(m->content);
-  }
+  print_mess_list(&mail->mess_list);
 }
 
 ssize_t read_mail(struct file *filp,
@@ -411,7 +405,7 @@ ssize_t read_mail(struct file *filp,
     while(list_empty(&mail->mess_list)){
       up(&mail->sem);
       /* blocking if happens */
-      if(is_read_blocking(filp))
+      if(read_blocking_mode(filp) == MS_BLOCK_DISABLED)
         return -EAGAIN;
       if( wait_event_interruptible(mail->rq, !list_empty(&mail->mess_list) ))
         return -ERESTARTSYS;
@@ -459,7 +453,7 @@ int __init init_module(void){
   mailslot *mail;
   log_info("Module init");
 
-  if(minor_bott < 0 || minor_top < 0 || max_instances < 0){
+  if(minor_bott < 0 || minor_top < 0){ //|| max_instances < 0){
     log_error("No MailSlot module param can be negative");
     return -EINVAL;
   }
@@ -489,14 +483,13 @@ int __init init_module(void){
       mail = mail_of(i);
       mail->minor = i;
       mail->size = 0;
-      mail->n_mess = 0;
       mail->max_mess_size = MESS_MAX_SIZE;    /* default max value used */
+      mail->max_storage = MAIL_INSTANCE_MAX_STORAGE;
       INIT_LIST_HEAD(&mail->mess_list);
       sema_init(&mail->sem, 1);               /* initially unlocked */
       init_waitqueue_head(&mail->rq);
       init_waitqueue_head(&mail->wq);
   }
-
 
   log_info("Module ready");
   return 0;

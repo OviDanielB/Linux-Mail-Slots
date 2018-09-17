@@ -21,6 +21,8 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ovidiu Daniel Barba <ovi.daniel.b@gmail.com>");
 MODULE_DESCRIPTION("Brief Modules Description");
 
+static int Major;
+static mail_instances instances;
 static int max_instances = MAIL_INSTANCES;
 static int minor_bott = MINOR_RANGE_BOTTOM;
 static int minor_top = MINOR_RANGE_TOP;
@@ -31,30 +33,27 @@ MODULE_PARM_DESC(minor_bott, "Driver minor number range bottom");
 module_param(minor_top, int, S_IRUSR | S_IRGRP );
 MODULE_PARM_DESC(minor_top, "Driver minor number range top");
 
-static int Major;
-static mail_instances instances;
-
-mailslot *mail_of(int minor){
+static mailslot *mail_of(int minor){
   return &(instances.instances[minor - minor_bott]);
 }
 
-int dev_minor(struct file *filp){
+static int dev_minor(struct file *filp){
   return iminor(filp->f_path.dentry->d_inode);
 }
 
-int minor_ok(int minor){
+static int minor_ok(int minor){
   if(minor >= minor_bott && minor <= minor_top)
     return 1;
   return 0;
 }
 
-int read_blocking_mode(struct file *filp){
+static int read_blocking_mode(struct file *filp){
   session_opt *so;
 
   so = (session_opt *) filp->private_data;
   if(!so){
     log_error("Session options are null");
-    return MS_BLOCK_ENABLED;       /* return default blocking mode */
+    return MS_BLOCKING;       /* return default blocking mode */
   }
   return so->bl_r;
 }
@@ -65,12 +64,12 @@ int write_blocking_mode(struct file *filp){
   so = (session_opt *) filp->private_data;
   if(!so){
     log_error("Session options are null");
-    return MS_BLOCK_ENABLED;       /* return default blocking mode */
+    return MS_BLOCKING;       /* return default blocking mode */
   }
   return so->bl_w;
 }
 
-void print_mess_list(struct list_head *head){
+static void print_mess_list(struct list_head *head){
   int j = 0;
   message *m;
   list_for_each_entry(m, head, list){
@@ -79,7 +78,7 @@ void print_mess_list(struct list_head *head){
   }
 }
 
-long ioctl_mail(struct file *file,
+static long ioctl_mail(struct file *file,
   unsigned int cmd, unsigned long arg){
 
     int err = 0, ret = 0;
@@ -193,7 +192,7 @@ long ioctl_mail(struct file *file,
     return ret;
   }
 
-int open_mail(struct inode *node, struct file *filp){
+static int open_mail(struct inode *node, struct file *filp){
   int minor;
   mailslot *mail;
   session_opt *so;
@@ -216,12 +215,12 @@ int open_mail(struct inode *node, struct file *filp){
 
   if(filp->f_flags & O_NONBLOCK){
     log_debug("Dev opened with O_NONBLOCK");
-    so->bl_r = MS_BLOCK_DISABLED;
-    so->bl_w = MS_BLOCK_DISABLED;
+    so->bl_r = MS_NON_BLOCKING;
+    so->bl_w = MS_NON_BLOCKING;
   } else {
     log_debug("Dev opened with blocking mode");
-    so->bl_r = MS_BLOCK_ENABLED;
-     so->bl_w = MS_BLOCK_ENABLED;
+    so->bl_r = MS_BLOCKING;
+     so->bl_w = MS_BLOCKING;
   }
   /* set session options */
   filp->private_data = so;
@@ -230,7 +229,7 @@ int open_mail(struct inode *node, struct file *filp){
   return 0;
 }
 
-int release_mail(struct inode *node, struct file *filp){
+static int release_mail(struct inode *node, struct file *filp){
   int minor;
   session_opt *so;
 
@@ -252,7 +251,7 @@ int release_mail(struct inode *node, struct file *filp){
 
 
 
-int fill_message(message *mess, const char *buff, int len){
+static int fill_message(message *mess, const char *buff, int len){
   size_t m_len;
 
   if(buff[len-1] == '\0'){
@@ -278,7 +277,7 @@ int fill_message(message *mess, const char *buff, int len){
   return 0;
 }
 
-void add_mess_to_mail(mailslot *mail, message *mess){
+static void add_mess_to_mail(mailslot *mail, message *mess){
   int new_size;
 
   list_add_tail(&mess->list, &mail->mess_list);
@@ -288,7 +287,7 @@ void add_mess_to_mail(mailslot *mail, message *mess){
   print_mess_list(&mail->mess_list);
 }
 
-int free_space(mailslot *mail){
+static int free_space(mailslot *mail){
   int f_space;
   f_space = mail->max_storage - mail->size;
   if(f_space <= 0){
@@ -299,7 +298,7 @@ int free_space(mailslot *mail){
   return f_space;
 }
 
-int mess_params_compliant(int len, mailslot *mail){
+static int mess_params_compliant(int len, mailslot *mail){
   if(len > mail->max_mess_size){
     log_dev_err(Major, mail->minor , "Trying to write message bigger than MESS_MAX_SIZE");
     return 0;
@@ -307,7 +306,7 @@ int mess_params_compliant(int len, mailslot *mail){
   return 1;
 }
 
-message *alloc_mess(void){
+static message *alloc_mess(void){
   message *mess;
   mess = kmalloc(sizeof(message), GFP_KERNEL);
   if(!mess){
@@ -319,13 +318,13 @@ message *alloc_mess(void){
 }
 
 /* free previously allocated kernel memory */
-void dealloc_mess(message *mess){
+static void dealloc_mess(message *mess){
   kfree(mess->content);
   kfree(mess);
 }
 
 
-ssize_t write_mail(struct file *filp,
+static ssize_t write_mail(struct file *filp,
   const char *buff, size_t len, loff_t *off){
 
   int ret;
@@ -355,7 +354,7 @@ ssize_t write_mail(struct file *filp,
 
   while(free_space(mail) == 0){  /* mail full */
     up(&mail->sem);
-    if(write_blocking_mode(filp) == MS_BLOCK_DISABLED)
+    if(write_blocking_mode(filp) == MS_NON_BLOCKING)
       return -EAGAIN;
     if(wait_event_interruptible(mail->wq, free_space(mail) > 0))
       return -ERESTARTSYS;  /* signal: tell the fs layer to handle it */
@@ -371,7 +370,7 @@ ssize_t write_mail(struct file *filp,
   return len;
 }
 
-message *first_message(mailslot *mail){
+static message *first_message(mailslot *mail){
   message *m;
   list_for_each_entry(m, &mail->mess_list, list){
     log_debug("Getting first message in list");
@@ -381,7 +380,7 @@ message *first_message(mailslot *mail){
   return NULL;
 }
 
-void detach_mess_from_mail(message *mess, mailslot *mail){
+static void detach_mess_from_mail(message *mess, mailslot *mail){
   log_debug("Deleting node");
   log_debug(mess->content);
   /* delete and reconstruct list */
@@ -392,7 +391,7 @@ void detach_mess_from_mail(message *mess, mailslot *mail){
   print_mess_list(&mail->mess_list);
 }
 
-ssize_t read_mail(struct file *filp,
+static ssize_t read_mail(struct file *filp,
   char *buff, size_t len, loff_t *off){
     mailslot *mail;
     message *mess;
@@ -405,7 +404,7 @@ ssize_t read_mail(struct file *filp,
     while(list_empty(&mail->mess_list)){
       up(&mail->sem);
       /* blocking if happens */
-      if(read_blocking_mode(filp) == MS_BLOCK_DISABLED)
+      if(read_blocking_mode(filp) == MS_NON_BLOCKING)
         return -EAGAIN;
       if( wait_event_interruptible(mail->rq, !list_empty(&mail->mess_list) ))
         return -ERESTARTSYS;
@@ -435,7 +434,6 @@ ssize_t read_mail(struct file *filp,
 
     return mess->len;
 }
-
 
 static struct file_operations fops = {
   .read =           read_mail,

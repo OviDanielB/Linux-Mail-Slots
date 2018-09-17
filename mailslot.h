@@ -24,5 +24,5 @@
 #define MS_IOC_MAX_NUM            8
 
 /* blocking or non blocking I/O */
-#define MS_BLOCK_ENABLED          1
-#define MS_BLOCK_DISABLED         0
+#define MS_BLOCKING               1
+#define MS_NON_BLOCKING           0

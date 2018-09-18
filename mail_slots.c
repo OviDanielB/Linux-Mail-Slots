@@ -34,9 +34,10 @@ MODULE_PARM_DESC(minor_bott, "Driver minor number range bottom");
 module_param(minor_top, int, S_IRUSR | S_IRGRP);
 MODULE_PARM_DESC(minor_top, "Driver minor number range top");
 
-static mailslot *mail_of(int minor)
+ mailslot *mail_of(int minor)
 {
-	return &(instances.instances[minor - minor_bott]);
+	int of = minor - minor_bott;
+	return &(instances.instances[of]);
 }
 
 static int dev_minor(struct file *filp)
@@ -94,6 +95,12 @@ static void print_mess_list(struct list_head *head)
 	}
 }
 
+void print_mail(mailslot *mail){
+	printk(KERN_INFO "Mail size is %d\n", mail->size);
+	printk(KERN_INFO "Mail max storage is %d\n ", mail->max_storage);
+	printk(KERN_INFO "Mess size is %d\n", mail->max_mess_size);
+}
+
 static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 {
 
@@ -125,13 +132,15 @@ static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 
 	minor = dev_minor(file);
 	mail = mail_of(minor);
+	printk(KERN_INFO "Minor is %d\n", minor);
+	print_mail(mail);
 	so = (session_opt *) file->private_data;
 
 	switch (cmd) {
 
 	case MS_IOC_SMESS_SIZE:
 		log_debug("Called MAILSLOT_IOC_SMESS_SIZE");
-		ret = __get_user(tmp_mess_size, (int *)arg);
+		ret = __get_user(tmp_mess_size, (int __user *)arg);
 		if (ret)
 			return ret;
 		if (tmp_mess_size <= 0) {
@@ -153,7 +162,13 @@ static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 		log_debug("Called MAILSLOT_IOC_GMESS_SIZE");
 		if (down_interruptible(&mail->sem))
 			return -ERESTARTSYS;
-		ret = __put_user(mail->max_mess_size, (int *)arg);
+		tmp_mess_size = mail->max_mess_size;
+		printk(KERN_INFO "TMP MESS SIZE is %d\n", tmp_mess_size);
+		ret = __put_user(tmp_mess_size, (int __user *)arg);
+		if(ret){
+			printk(KERN_ALERT "err %d",ret );
+		}
+		print_mail(mail);
 		up(&mail->sem);
 		break;
 
@@ -214,10 +229,12 @@ static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 		printk(KERN_INFO "Max storage for mail %d is now set to %d.\n",
 		       minor, mail->max_storage);
 		up(&mail->sem);
+		break;
 
 	case MS_IOC_GMAX_STORAGE:
 		log_debug("Called MS_IOC_SMAX_STORAGE");
 		ret = __put_user(mail->max_storage, (int *)arg);
+		break;
 
 	default:
 		ret = -ENOTTY;
@@ -241,6 +258,7 @@ static int open_mail(struct inode *node, struct file *filp)
 	}
 
 	mail = mail_of(minor);
+	print_mail(mail);
 
 	so = kmalloc(sizeof(session_opt), GFP_KERNEL);
 	if (!so) {
@@ -380,7 +398,7 @@ static ssize_t write_mail(struct file *filp,
 			  const char *buff, size_t len, loff_t * off)
 {
 
-	int ret;
+	ssize_t ret;
 	mailslot *mail;
 	message *mess;
 
@@ -388,7 +406,8 @@ static ssize_t write_mail(struct file *filp,
 	mail = mail_of(dev_minor(filp));
 
 	if (!mess_params_compliant(len, mail)) {
-		return -EOVERFLOW;	/* mess too big */
+		//return -EINVAL;	/* mess too big */
+		return 0;
 	}
 
 	/* message creation and copy from user buffer is done

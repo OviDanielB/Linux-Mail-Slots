@@ -137,8 +137,6 @@ static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 
 	minor = dev_minor(file);
 	mail = mail_of(minor);
-	printk(KERN_INFO "Minor is %d\n", minor);
-	print_mail(mail);
 	so = (session_opt *) file->private_data;
 
 	switch (cmd) {
@@ -173,7 +171,6 @@ static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 		if(ret){
 			printk(KERN_ALERT "err %d",ret );
 		}
-		print_mail(mail);
 		up(&mail->sem);
 		break;
 
@@ -237,7 +234,7 @@ static long ioctl_mail(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 
 	case MS_IOC_GMAX_STORAGE:
-		log_debug("Called MS_IOC_SMAX_STORAGE");
+		log_debug("Called MS_IOC_GMAX_STORAGE");
 		ret = __put_user(mail->max_storage, (int *)arg);
 		break;
 
@@ -298,7 +295,6 @@ static int release_mail(struct inode *node, struct file *filp)
 		/* debug purpose */
 		log_dev_err(Major, minor, "Session options should not be null");
 	} else {
-		log_debug("Freeing session_opt struct");
 		/* private data won't be freed by kernel . manual freeing required */
 		kfree(so);
 	}
@@ -406,7 +402,6 @@ static void register_curr_to_fifo(struct list_head *fifo_head){
   fifo_task *ft;
 
   if(list_empty(fifo_head)){
-    log_debug("FIFO_W empty. adding node");
     ft = kmalloc(sizeof(struct fifo_task), GFP_KERNEL);
     ft->task = current;
     list_add_tail(&ft->list, fifo_head);
@@ -414,13 +409,12 @@ static void register_curr_to_fifo(struct list_head *fifo_head){
   }
 	list_for_each_entry(ft, fifo_head, list) {
 		if(ft->task->pid == current->pid){
-      log_debug("Found same process on FIFO_W");
-      return;
+      return;   /* if already present, do nothing */
     }
 	}
   ft = kmalloc(sizeof(struct fifo_task), GFP_KERNEL);
   ft->task = current;
-  list_add_tail(&ft->list,fifo_head);
+  list_add_tail(&ft->list,fifo_head);   /* if not present, add to FIFO list */
   return;
 
 }
@@ -436,8 +430,7 @@ static int should_perform_op(struct list_head *fifo_head){
     return 1;
   list_for_each_entry(ft, fifo_head, list) {
 		if(ft->task->pid != current->pid){
-      log_debug("Task shouldn't write first");
-      return 0;
+      return 0;  /* first element is another task */
     } else {
       /* if first element is itself */
       return 1;
@@ -456,7 +449,6 @@ static void unregister_curr_from_fifo(struct list_head *fifo_head){
     return;
   list_for_each_entry(ft, fifo_head, list) {
   	if(ft->task->pid == current->pid){
-      log_debug("Found task to remove");
       list_del_init(&ft->list);
       kfree(ft);
       return;
@@ -515,8 +507,6 @@ static ssize_t write_mail(struct file *filp,
 
   if (!mess_params_compliant(len, mail)) {
     up(&mail->sem);
-    /* wake up any write */
-  	wake_up_interruptible(&mail->wq);
 		return 0; /* can't write mess because too big */
 	}
 

@@ -38,6 +38,10 @@ MODULE_PARM_DESC(minor_top, "Driver minor number range top");
  mailslot *mail_of(int minor)
 {
 	int of = minor - minor_bott;
+  if(of < 0){
+    log_error("Mail index is < 0");
+    return NULL;
+  }
 	return &(instances.instances[of]);
 }
 
@@ -259,7 +263,6 @@ static int open_mail(struct inode *node, struct file *filp)
 	}
 
 	mail = mail_of(minor);
-	print_mail(mail);
 
 	so = kmalloc(sizeof(session_opt), GFP_KERNEL);
 	if (!so) {
@@ -397,7 +400,7 @@ static void dealloc_mess(message * mess)
 
 /*
  * Add (if not already present) current task to
- * speific operation fifo queue 
+ * speific operation fifo queue
  */
 static void register_curr_to_fifo(struct list_head *fifo_head){
   fifo_task *ft;
@@ -655,19 +658,18 @@ int __init init_module(void)
 	}
 	log_dev(Major, -1, "Registration succedded");
 
-	for (i = 0; i < max_instances; i++) {
+	for (i = minor_bott; i < minor_bott + max_instances; i++) {
 		mail = mail_of(i);
-		mail->minor = minor_bott + i;                   /* corrisponding minor number */
+		mail->minor = i;                   /* corrisponding minor number */
 		mail->size = 0;																	/* initial size is 0 (no message) */
 		mail->max_mess_size = MESS_MAX_SIZE;						/* default max value used; can be changed with ioctl  */
 		mail->max_storage = MAIL_INSTANCE_MAX_STORAGE;  /* default max storage for isntance; can be changed with ioctl */
 		INIT_LIST_HEAD(&mail->mess_list);               /* empty message list */
+    INIT_LIST_HEAD(&mail->fifo_r);                  /* reading fifo list */
+    INIT_LIST_HEAD(&mail->fifo_w);                  /* writing fifo list */
 		sema_init(&mail->sem, 1);												/* initially unlocked */
 		init_waitqueue_head(&mail->rq);                 /* readers waiting queue */
 		init_waitqueue_head(&mail->wq);                 /* writers waiting queue  */
-
-    INIT_LIST_HEAD(&mail->fifo_r);
-    INIT_LIST_HEAD(&mail->fifo_w);
 	}
 
 	log_info("Module ready");

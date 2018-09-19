@@ -50,7 +50,7 @@ int main(int argc, char **argv){
     }
     printf("Opened file %s\n", FILE_PATH );
 
-    max_mess_size = 3;
+    max_mess_size = 10;
 
     ioctl(fd, MS_IOC_SMESS_SIZE, &max_mess_size);
 

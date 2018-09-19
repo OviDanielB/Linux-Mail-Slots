@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-int msgr(char* dev) {
+int msgr(char* dev, char *param) {
     printf("start %s\n", dev);
     int fd = open(dev, O_RDWR);
     if (fd < 0) {
@@ -27,11 +27,11 @@ int msgr(char* dev) {
     }
     data[ret]='\0';
 
-    printf("letto: %s\n", data);
+    printf("Read from %s: %s\n", param, data);
 
     close(fd);
 }
 
 int main(int argc, char **argv){
-  msgr("/dev/mail0");
+  msgr("/dev/mail0", argv[1]);
 }

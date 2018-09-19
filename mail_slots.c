@@ -9,6 +9,7 @@
 #include <linux/wait.h>		/* For wait queues */
 #include <linux/semaphore.h>
 #include <linux/ioctl.h>
+#include <linux/sched.h>
 #include <asm/uaccess.h>	/* for put_user */
 
 #include "utils/log.h"
@@ -394,6 +395,73 @@ static void dealloc_mess(message * mess)
 	kfree(mess);
 }
 
+/*
+ * Add (if not already present) current task to
+ * speific operation fifo queue 
+ */
+static void register_curr_to_fifo(struct list_head *fifo_head){
+  fifo_task *ft;
+
+  if(list_empty(fifo_head)){
+    log_debug("FIFO_W empty. adding node");
+    ft = kmalloc(sizeof(struct fifo_task), GFP_KERNEL);
+    ft->task = current;
+    list_add_tail(&ft->list, fifo_head);
+    return;
+  }
+	list_for_each_entry(ft, fifo_head, list) {
+		if(ft->task->pid == current->pid){
+      log_debug("Found same process on FIFO_W");
+      return;
+    }
+	}
+  ft = kmalloc(sizeof(struct fifo_task), GFP_KERNEL);
+  ft->task = current;
+  list_add_tail(&ft->list,fifo_head);
+  return;
+
+}
+
+/*
+ * checks whether a task should perform read or write file_operation
+ * or should wait for other process(es) to perform that specific operation
+ * before him
+ */
+static int should_perform_op(struct list_head *fifo_head){
+  fifo_task *ft;
+  if(list_empty(fifo_head))
+    return 1;
+  list_for_each_entry(ft, fifo_head, list) {
+		if(ft->task->pid != current->pid){
+      log_debug("Task shouldn't write first");
+      return 0;
+    } else {
+      /* if first element is itself */
+      return 1;
+    }
+	}
+  return 1;
+}
+
+/*
+ * remove (if present) current process fron specific operation
+ * fifo queue
+ */
+static void unregister_curr_from_fifo(struct list_head *fifo_head){
+  fifo_task *ft;
+  if(list_empty(fifo_head))
+    return;
+  list_for_each_entry(ft, fifo_head, list) {
+  	if(ft->task->pid == current->pid){
+      log_debug("Found task to remove");
+      list_del_init(&ft->list);
+      kfree(ft);
+      return;
+    }
+  }
+
+}
+
 static ssize_t write_mail(struct file *filp,
 			  const char *buff, size_t len, loff_t * off)
 {
@@ -405,32 +473,48 @@ static ssize_t write_mail(struct file *filp,
 	log_debug("Write");
 	mail = mail_of(dev_minor(filp));
 
-	if (!mess_params_compliant(len, mail)) {
-		//return -EINVAL;	/* mess too big */
-		return 0;
-	}
-
-	/* message creation and copy from user buffer is done
-	 * before taking the semaphore;
-	 * it would occupy the mailslot without reason
-	 */
-	mess = alloc_mess();
-	if (!mess)
-		return -ENOMEM;
-	ret = fill_message(mess, buff, len);
-	if (ret)
-		return ret;
 	if (down_interruptible(&mail->sem))
 		return -ERESTARTSYS;
 
-	while (free_space(mail) == 0) {	/* mail full */
+  if (!mess_params_compliant(len, mail)) {
 		up(&mail->sem);
-		if (write_blocking_mode(filp) == MS_NON_BLOCKING)
+  	return 0; // mess too big
+  }
+
+  mess = alloc_mess();
+	if (!mess)
+  	return -ENOMEM;
+  ret = fill_message(mess, buff, len);
+  if (ret)
+  	return ret;
+
+	while (free_space(mail) == 0) {	/* mail full */
+		if (write_blocking_mode(filp) == MS_NON_BLOCKING){
+      up(&mail->sem);
 			return -EAGAIN;
+    }
+    register_curr_to_fifo(&mail->fifo_w);
+    up(&mail->sem);
 		if (wait_event_interruptible(mail->wq, free_space(mail) > 0))
 			return -ERESTARTSYS;	/* signal: tell the fs layer to handle it */
 		if (down_interruptible(&mail->sem))
 			return -ERESTARTSYS;
+
+    while(!should_perform_op(&mail->fifo_w)){
+      up(&mail->sem);
+      if (wait_event_interruptible(mail->wq, should_perform_op(&mail->fifo_w) ))
+  			return -ERESTARTSYS;
+      if (down_interruptible(&mail->sem))
+    		return -ERESTARTSYS;
+    }
+    unregister_curr_from_fifo(&mail->fifo_w);
+	}
+
+  if (!mess_params_compliant(len, mail)) {
+    up(&mail->sem);
+    /* wake up any write */
+  	wake_up_interruptible(&mail->wq);
+		return 0; /* can't write mess because too big */
 	}
 
 	add_mess_to_mail(mail, mess);
@@ -460,6 +544,7 @@ static void detach_mess_from_mail(message * mess, mailslot * mail)
 	log_debug(mess->content);
 	/* removes and reconstruct list */
 	list_del_init(&mess->list);
+  /* update mail size after mess removal */
 	mail->size = mail->size - mess->len;
 
 	log_debug("New list without deleted element");
@@ -478,15 +563,27 @@ static ssize_t read_mail(struct file *filp,
 		return -ERESTARTSYS;
 
 	while (list_empty(&mail->mess_list)) {  /* nothing to read */
-		up(&mail->sem);
-		/* blocking if happens */
-		if (read_blocking_mode(filp) == MS_NON_BLOCKING)
+		if (read_blocking_mode(filp) == MS_NON_BLOCKING){
+      up(&mail->sem);
 			return -EAGAIN;
+    }
+    register_curr_to_fifo(&mail->fifo_r);
+    up(&mail->sem);
 		if (wait_event_interruptible
 		    (mail->rq, !list_empty(&mail->mess_list)))
 			return -ERESTARTSYS;
 		if (down_interruptible(&mail->sem))
 			return -ERESTARTSYS;
+
+    while(!should_perform_op(&mail->fifo_r)){
+      up(&mail->sem);
+      if (wait_event_interruptible(mail->wq, should_perform_op(&mail->fifo_r) ))
+    		return -ERESTARTSYS;
+      if (down_interruptible(&mail->sem))
+    		return -ERESTARTSYS;
+    }
+
+    unregister_curr_from_fifo(&mail->fifo_r);
 	}
 
 	mess = first_message(mail);
@@ -568,6 +665,9 @@ int __init init_module(void)
 		sema_init(&mail->sem, 1);												/* initially unlocked */
 		init_waitqueue_head(&mail->rq);                 /* readers waiting queue */
 		init_waitqueue_head(&mail->wq);                 /* writers waiting queue  */
+
+    INIT_LIST_HEAD(&mail->fifo_r);
+    INIT_LIST_HEAD(&mail->fifo_w);
 	}
 
 	log_info("Module ready");

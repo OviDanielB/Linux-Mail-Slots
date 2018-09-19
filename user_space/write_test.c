@@ -31,7 +31,7 @@ int msgw(char* dev, char* s) {
 }
 
 int main(int argc, char **argv){
-  msgw("/dev/mail0", "I");
-  msgw("/dev/mail0", "am");
+  msgw("/dev/mail0",argv[1]);
+  //msgw("/dev/mail0", "am");
 
 }

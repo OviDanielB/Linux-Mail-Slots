@@ -43,7 +43,7 @@ int main(int argc, char **argv){
 
     char *phrase[6] = { "Hello", "World", "I", "develop", "in", "C"};
 
-    fd = open(FILE_PATH, O_RDWR | O_NONBLOCK);
+    fd = open(FILE_PATH, O_RDWR );
     if(fd < 0){
       fprintf(stderr, "Error in opening file %s with errno %s\n", FILE_PATH, errno);
       return -1;
@@ -58,7 +58,7 @@ int main(int argc, char **argv){
 
       if(write_mess(fd, *(phrase + i)) == 0){
         printf("Message %s can't be written.\n", *(phrase + i));
-      }else {
+      } else {
         printf("Written %s\n", *(phrase + i) );
       }
     }
